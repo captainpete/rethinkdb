@@ -1210,6 +1210,7 @@ public:
 protected:
     explicit subscription_t(feed_t *_feed, const datum_t &squash, bool include_states);
     void maybe_signal_cond() THROWS_NOTHING;
+    void maybe_signal_queue_nearly_full_cond() THROWS_NOTHING;
     void destructor_cleanup(std::function<void()> del_sub) THROWS_NOTHING;
 
     // If an error occurs, we're detached and `exc` is set to an exception to rethrow.
@@ -1235,6 +1236,7 @@ private:
 
     // Used to block on more changes.  NULL unless we're waiting.
     cond_t *cond;
+    cond_t *queue_nearly_full_cond;
     auto_drainer_t drainer;
     DISABLE_COPYING(subscription_t);
 };
@@ -1263,6 +1265,15 @@ public:
             if (queue->size() > limits.array_size_limit()) {
                 skipped += queue->size();
                 queue->clear();
+            } else if (queue->size() > limits.array_size_limit() / 2) {
+                // We do this even if the queue is only half full because we
+                // expect it to take some time to process and we want to be
+                // super safe.  (This will only affect anything if your `squash`
+                // timer is super long, in which case a more aggressive upper
+                // limit would let us respect the `squash` timer more closely,
+                // but since the timer is a hint it's OK to be safe in this edge
+                // case.)
+                maybe_signal_queue_nearly_full_cond();
             }
             maybe_signal_cond();
         }
@@ -2525,7 +2536,8 @@ subscription_t::subscription_t(
       include_states(_include_states),
       mid_batch(false),
       min_interval(_squash.get_type() == datum_t::R_NUM ? _squash.as_num() : 0.0),
-      cond(NULL) {
+      cond(NULL),
+      queue_nearly_full_cond(NULL) {
     guarantee(feed != NULL);
 }
 
@@ -2557,6 +2569,21 @@ subscription_t::get_els(batcher_t *batcher,
         // If we have to wait, wait.
         if (min_interval > 0.0
             && batcher->get_batch_type() != batch_type_t::NORMAL_FIRST) {
+            signal_timer_t timer(min_interval * 1000);
+            cond_t wait_for_nearly_full_queue;
+            queue_nearly_full_cond = &wait_for_nearly_full_queue;
+            try {
+                wait_any_t any_interruptor(interruptor, &timer);
+                // Make sure to wait on `wait_for_nearly_full_queue` because we
+                // don't trust `queue_nearly_full_cond` to not be `NULL`
+                // already(although I'm not sure why we don't trust that).
+                wait_interruptible(&wait_for_nearly_full_queue, &any_interruptor);
+            } catch (const interrupted_exc_t &e) {
+                queue_nearly_full_cond = NULL;
+                // If we were really interrupted, rethrow.
+                if (!timer.is_pulsed()) throw e;
+            }
+            r_sanity_check(queue_nearly_full_cond == NULL);
             // It's OK to let the `interrupted_exc_t` propagate up.
             nap(min_interval * 1000, interruptor);
         }
@@ -2635,6 +2662,15 @@ void subscription_t::maybe_signal_cond() THROWS_NOTHING {
         ASSERT_NO_CORO_WAITING;
         cond->pulse();
         cond = NULL;
+    }
+}
+
+void subscription_t::maybe_signal_queue_nearly_full_cond() THROWS_NOTHING {
+    assert_thread();
+    if (queue_nearly_full_cond != NULL) {
+        ASSERT_NO_CORO_WAITING;
+        queue_nearly_full_cond->pulse();
+        queue_nearly_full_cond = NULL;
     }
 }
 

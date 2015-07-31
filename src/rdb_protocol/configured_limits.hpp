@@ -13,18 +13,24 @@ namespace ql {
 class wire_func_t;
 class global_optargs_t;
 
-class configured_limits_t {
-public:
-    configured_limits_t() : array_size_limit_(100000) {}
-    explicit configured_limits_t(const size_t limit) : array_size_limit_(limit) {}
+struct configured_limits_t {
+    configured_limits_t() :
+        changefeed_queue_size_(default_changefeed_queue_size),
+        array_size_limit_(default_array_size_limit) {}
+    explicit configured_limits_t(size_t changefeed_queue_size, size_t array_size_limit)
+        : changefeed_queue_size_(changefeed_queue_size),
+          array_size_limit_(array_size_limit) { }
 
-    size_t array_size_limit() const { return array_size_limit_; }
-
+    static const size_t default_changefeed_queue_size = 100000;
+    static const size_t default_array_size_limit = 100000;
     static const configured_limits_t unlimited;
 
-    RDB_DECLARE_ME_SERIALIZABLE(configured_limits_t);
+    size_t changefeed_queue_size() const { return changefeed_queue_size_; }
+    size_t array_size_limit() const { return array_size_limit_; }
 private:
+    size_t changefeed_queue_size_;
     size_t array_size_limit_;
+    RDB_DECLARE_ME_SERIALIZABLE(configured_limits_t);
 };
 
 configured_limits_t from_optargs(rdb_context_t *ctx, signal_t *interruptor,
